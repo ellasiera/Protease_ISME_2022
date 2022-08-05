@@ -6,6 +6,8 @@ output: html_document
 ---
 ```{r, setup, include=FALSE}
 knitr::opts_knit$set(root.dir = '~/Dropbox/PostDoc/MT_nitrogen/')
+working_directory <- '~/Dropbox/PostDoc/MT_nitrogen/'
+setwd(working_directory)
 
 library("DESeq2")
 library("Biobase")
@@ -38,7 +40,7 @@ colnames(mtx_matrix) <- gsub(".mapped.bam", "", colnames(mtx_matrix))
 colnames(mtx_matrix) <- gsub(".", "_", colnames(mtx_matrix), fixed = TRUE)
 mtx_matrix <- mtx_matrix[, -(which(colnames(mtx_matrix) %in% c("H3_Rhizo_39", "H1_Rhizo_Litter_2", "H2_Rhizo_Litter_9")))]
 
-designfile = "mtx_design_ecofun_genomes4.txt" 
+designfile = "From_Erin/mtx_design_ecofun_genomes4.txt" 
 
 mtx_design = read.delim(designfile, header = TRUE, row.names = 1)
 mtx_design <- mtx_design[!(rownames(mtx_design) %in% c("H3_Rhizo_39", "H1_RhizoLitter_2", "H2_RhizoLitter_9")),] # Remove these because these columns are mostly 0s, was messing up the geometric mean 
@@ -70,8 +72,8 @@ rownames(dds_counts) <- rownames(res)
 ann <- read.delim("ann_for_Rsubread_new.txt", sep="\t", header=F, stringsAsFactors = F) %>%
   select(c(1,3))
 colnames(ann) <- c("GeneID", "KO")
-nitrogen_ko <- c("MER", "K07004", "K07273", "K01428", "K01429", "K01430")
-nitrogen_gene <- c("prot","Xds", "lys", "ureA", "ureB", "ureC")
+nitrogen_ko <- c("MER", "K07004", "K07273", "K01428", "K01429", "K01430", "K01183")
+nitrogen_gene <- c("prot","Xds", "lys", "ureA", "ureB", "ureC", "chit1")
 ko_to_gene <- data.frame(nitrogen_ko, nitrogen_gene)
 colnames(ko_to_gene) <- c("KO", "gene")
 
@@ -79,30 +81,189 @@ dds_ann <- merge(dds_counts, ann, by.x="row.names", by.y="GeneID")
 write.csv(dds_ann, file = "htl_ORFs.csv")
 nit <- dds_ann[dds_ann$KO %in% nitrogen_ko,]
 nit <- distinct(nit)
-write.csv(nit, file = "DESeq_normalized_nitrogen.csv", row.names=FALSE)
+write.csv(nit, file = "DESeq_normalized_protease.csv", row.names=FALSE)
 saveRDS(dds, file = "dds_htl_nitrogen.rds")
 
 # Test difference in counts between macromolecular N degradation genes
-df <- reshape2::melt(nit) %>%
+# First add a control (H0) that doesn't change between treatments/location/time
+for (i in 1:10) {
+  nit[nrow(nit)+1,] <- c(paste0("ctrl", i), rep(1, 45), "CTRL")
+}
+nit[,2:46] <- sapply(nit[,2:46], as.numeric)
+
+df <- reshape2::melt(nit, id.vars=c("Row.names", "KO")) %>%
   mutate(grp = gsub("^H[1-4]_", "", gsub("_[0-9]*$", "", variable))) %>%
   mutate(grp = fct_relevel(grp, c("Bulk", "BulkLitter", "Rhizo", "RhizoLitter"))) %>%
-  mutate(
-    ptwy = case_when(
-    KO == "K01428" ~ "urease",
-    KO == "K01429" ~ "urease",
-    KO == "K01430" ~ "urease",
-    KO == "MER" ~ "protease",
-    TRUE ~ "chitinase"
+  mutate(loc = factor(gsub("Litter", "", grp))) %>%
+  mutate(treat = factor(
+    ifelse(str_detect(grp, "Litter"), "Litter", "NoLitter")
   )) %>%
   mutate(time = factor(gsub("_.*", "", variable))) %>%
-  na.omit()
+  left_join(ko_to_gene, by="KO") %>%
+  mutate(ptwy = 
+    case_when(
+      gene %like% "ure" ~ "urease",
+      gene == "Xds" ~ "exoribonuclease",
+      gene == "lys" ~ "lysozyme",
+      gene =="prot" ~ "protease",
+      KO=="CTRL" ~ "control",
+      TRUE ~ "chitinase"
+    )
+  ) %>%
+  mutate(ptwy = fct_relevel(ptwy, c("control", "urease", "lysozyme", "exoribonuclease", "chitinase", "protease")))
 
-df_lm <- lm(value ~ KO*grp, data=df)
+# Test significance of patterns in figure 1 A and B
+df_prot <- df %>%
+  filter(ptwy == "protease")
+
+df_lm <- lm(value ~ treat*time, data=df_prot)
 summary(df_lm)
-# Significant results:
-# KOK07273:grpBulkLitter   3.978956   1.538855   2.586 0.009720 ** 
-# KOK07273:grpRhizoLitter  6.621965   1.573440   4.209 2.57e-05 ***
-# KOMER:grpRhizoLitter     1.864256   0.740947   2.516 0.011869 *
+#                       Estimate Std. Error t value Pr(>|t|)    
+# (Intercept)            5.57093    0.17839  31.230  < 2e-16 ***
+# grpBulkLitter          1.83712    0.25228   7.282 3.29e-13 ***
+# grpRhizo               0.15293    0.25228   0.606 0.544378    
+# grpRhizoLitter         1.59828    0.28205   5.667 1.46e-08 ***
+# timeH2                 0.43629    0.25228   1.729 0.083737 .  
+# timeH3                 0.57727    0.25228   2.288 0.022124 *  
+# timeH4                 1.38408    0.25228   5.486 4.11e-08 ***
+# grpBulkLitter:timeH2  -0.84855    0.34544  -2.456 0.014034 *  
+# grpRhizo:timeH2       -0.24897    0.35677  -0.698 0.485286    
+# grpRhizoLitter:timeH2 -1.41381    0.37841  -3.736 0.000187 ***
+# grpBulkLitter:timeH3  -1.67237    0.37841  -4.419 9.90e-06 ***
+# grpRhizo:timeH3       -0.31856    0.43696  -0.729 0.465972    
+# grpRhizoLitter:timeH3 -1.48986    0.37841  -3.937 8.25e-05 ***
+# grpBulkLitter:timeH4  -1.63588    0.35677  -4.585 4.54e-06 ***
+# grpRhizo:timeH4       -0.01327    0.35677  -0.037 0.970337    
+# grpRhizoLitter:timeH4 -1.38750    0.37841  -3.667 0.000246 ***
+# ---
+# Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+
+df_prot_litter <- df_prot %>%
+  filter(treat == "Litter")
+df_lm_litter <- lm(value ~ time, data=df_prot_litter)
+summary(df_lm_litter)
+#             Estimate Std. Error t value Pr(>|t|)    
+# (Intercept)   7.3125     0.1492  49.015  < 2e-16 ***
+# timeH2       -0.6613     0.1953  -3.386  0.00071 ***
+# timeH3       -1.0334     0.2110  -4.898  9.7e-07 ***
+# timeH4       -0.1515     0.2020  -0.750  0.45328 
+# ---
+# Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+# 
+# Residual standard error: 25.61 on 135581 degrees of freedom
+# Multiple R-squared:  0.0002356,	Adjusted R-squared:  0.0002135 
+# F-statistic: 10.65 on 3 and 135581 DF,  p-value: 5.366e-07
+
+df_prot_nolitter <- df_prot %>%
+  filter(treat == "NoLitter") %>%
+  mutate(logval = log(value+1))
+df_lm_nolitter <- lm(logval ~ time, data=df_prot_nolitter)
+summary(df_lm_nolitter)
+#             Estimate Std. Error t value Pr(>|t|)    
+# (Intercept) 1.130403   0.005845 193.385  < 2e-16 ***
+# timeH2      0.045723   0.008267   5.531 3.19e-08 ***
+# timeH3      0.019767   0.009242   2.139   0.0325 *  
+# timeH4      0.049191   0.008267   5.951 2.68e-09 ***
+# ---
+# Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+# 
+# Residual standard error: 1.099 on 129686 degrees of freedom
+# Multiple R-squared:  0.0003574,	Adjusted R-squared:  0.0003343 
+# F-statistic: 15.46 on 3 and 129686 DF,  p-value: 4.754e-10
+
+# Bulk Litter
+df_prot_litter_bulk <- df_prot_litter %>%
+  filter(str_detect(grp, "Bulk")) %>%
+  filter(value>0)
+summary(lm(value~time, data=df_prot_litter_bulk))
+p_vals <- summary(lm(value~time, data=df_prot_litter_bulk))$coefficients[-1,4]
+#             Estimate Std. Error t value Pr(>|t|)    
+# (Intercept)  11.4161     0.3161  36.120  < 2e-16 ***
+# timeH2       -1.0308     0.4148  -2.485   0.0130 *  
+# timeH3       -2.5817     0.4858  -5.315 1.07e-07 ***
+# timeH4       -1.0781     0.4399  -2.451   0.0143 *   
+
+# Bulk no Litter
+df_prot_nolitter_bulk <- df_prot_nolitter %>%
+  filter(str_detect(grp, "Bulk")) %>%
+  filter(value>0)
+summary(lm(value~time, data=df_prot_nolitter_bulk))
+p_vals <- c(p_vals, summary(lm(value~time, data=df_prot_nolitter_bulk))$coefficients[-1,4])
+#             Estimate Std. Error t value Pr(>|t|)    
+# (Intercept)   8.3557     0.2504  33.370  < 2e-16 ***
+# timeH2        0.9872     0.3574   2.762  0.00574 ** 
+# timeH3        0.5603     0.3512   1.596  0.11057    
+# timeH4        1.8968     0.3526   5.380 7.49e-08 ***
+
+# Rhizo Litter
+df_prot_litter_rhizo <- df_prot_litter %>%
+  filter(str_detect(grp, "Rhizo")) %>%
+  filter(value>0)
+summary(lm(value~time, data=df_prot_litter_rhizo))
+p_vals <- c(p_vals, summary(lm(value~time, data=df_prot_litter_rhizo))$coefficients[-1,4])
+#             Estimate Std. Error t value Pr(>|t|)    
+# (Intercept)  10.5144     0.2903  36.219  < 2e-16 ***
+# timeH2       -2.2051     0.3684  -5.986 2.16e-09 ***
+# timeH3       -1.1422     0.3764  -3.035  0.00241 ** 
+# timeH4       -0.5648     0.3708  -1.523  0.12765       
+
+# Rhizo no Litter
+df_prot_nolitter_rhizo <- df_prot_nolitter %>%
+  filter(str_detect(grp, "Rhizo")) %>%
+  filter(value>0)
+summary(lm(value~time, data=df_prot_nolitter_rhizo))
+p_vals <- c(p_vals, summary(lm(value~time, data=df_prot_nolitter_rhizo))$coefficients[-1,4])
+#            Estimate Std. Error t value Pr(>|t|)    
+# (Intercept)  8.00779    0.20874  38.362  < 2e-16 ***
+# timeH2      -0.03195    0.29257  -0.109    0.913    
+# timeH3       1.97162    0.44658   4.415 1.01e-05 ***
+# timeH4       1.97227    0.29561   6.672 2.56e-11 ***
+
+df_chit <- df %>%
+  filter(ptwy == "chitinase")
+summary(lm(value~time, data=df_chit[df_chit$ptwy=="chitinase" & df_chit$grp=="Bulk",]))
+p_vals <- c(p_vals, summary(lm(value~time, data=df_chit[df_chit$ptwy=="chitinase" & df_chit$grp=="Bulk",]))$coefficients[-1,4])
+#             Estimate Std. Error t value Pr(>|t|)  
+# (Intercept)   1.9339     0.8949   2.161   0.0310 *
+# timeH2        0.3670     1.2656   0.290   0.7719  
+# timeH3        3.1298     1.2656   2.473   0.0136 *
+# timeH4        2.9995     1.2656   2.370   0.0180 *
+summary(lm(value~time, data=df_chit[df_chit$ptwy=="chitinase" & df_chit$grp=="BulkLitter",]))
+p_vals <- c(p_vals, summary(lm(value~time, data=df_chit[df_chit$ptwy=="chitinase" & df_chit$grp=="BulkLitter",]))$coefficients[-1,4])
+#             Estimate Std. Error t value Pr(>|t|)  
+# (Intercept)    6.285      2.635   2.386   0.0173 *
+# timeH2         2.357      3.485   0.676   0.4991  
+# timeH3         5.562      4.166   1.335   0.1822  
+# timeH4         8.660      3.726   2.324   0.0204 *
+summary(lm(value~time, data=df_chit[df_chit$ptwy=="chitinase" & df_chit$grp=="Rhizo",]))
+p_vals <- c(p_vals, summary(lm(value~time, data=df_chit[df_chit$ptwy=="chitinase" & df_chit$grp=="Rhizo",]))$coefficients[-1,4])
+#             Estimate Std. Error t value Pr(>|t|)    
+# (Intercept)   4.2877     0.9882   4.339 1.65e-05 ***
+# timeH2       -1.0123     1.3976  -0.724    0.469    
+# timeH3       -2.8567     1.9765  -1.445    0.149    
+# timeH4        1.6623     1.3976   1.189    0.235    
+summary(lm(value~time, data=df_chit[df_chit$ptwy=="chitinase" & df_chit$grp=="RhizoLitter",]))
+p_vals <- c(p_vals, summary(lm(value~time, data=df_chit[df_chit$ptwy=="chitinase" & df_chit$grp=="RhizoLitter",]))$coefficients[-1,4])
+#             Estimate Std. Error t value Pr(>|t|)   
+# (Intercept)    6.469      3.175   2.037  0.04198 * 
+# timeH2         1.077      4.099   0.263  0.79276   
+# timeH3         5.401      4.099   1.318  0.18804   
+# timeH4        11.284      4.099   2.753  0.00605 **
+
+p_vals_adj <- p.adjust(p_vals, method="BH")
+p_vals
+p_vals_adj
+names(p_vals_adj)[1:3] <- paste0("protBulkLitter_", names(p_vals_adj)[1:3])
+names(p_vals_adj)[4:6] <- paste0("protBulkNoLitter_", names(p_vals_adj)[4:6])
+names(p_vals_adj)[7:9] <- paste0("protRhizoLitter_", names(p_vals_adj)[7:9])
+names(p_vals_adj)[10:12] <- paste0("protRhizoNoLitter_", names(p_vals_adj)[10:12])
+names(p_vals_adj)[13:15] <- paste0("chitBulkNoLitter_", names(p_vals_adj)[13:15])
+names(p_vals_adj)[16:18] <- paste0("chitBulkLitter_", names(p_vals_adj)[16:18])
+names(p_vals_adj)[19:21] <- paste0("chitRhizoNoLitter_", names(p_vals_adj)[19:21])
+names(p_vals_adj)[22:24] <- paste0("chitRhizoLitter_", names(p_vals_adj)[22:24])
+which(p_vals_adj < 0.05 & p_vals_adj >= 0.01)
+which(p_vals_adj < 0.01 & p_vals_adj >= 0.001)
+which(p_vals_adj < 0.001)
 ```
 
 ```{r}
@@ -288,7 +449,7 @@ betas <- res_all_data_bulkcomp_sig[, c(1:13, ncol(res_all_data_bulkcomp_sig))]
 df <- betas[order(betas$KO),]
 write.csv(df, "DESeq_bygene_wKO.csv")
 
-prot_tax <- read.csv("sup_tbl_S5_metaT_vs_prot_reciprocal_besthit.csv")
+prot_tax <- read.csv(paste0(working_directory, "sup_tbl_S5_metaT_vs_exoprot_reciprocal_besthit_EEN.csv"))
 prot <- df[df$KO=="MER",-c(ncol(df), ncol(df)-1)]
 prot <- merge(prot, prot_tax, by.x="Row.names", by.y="transcript_id")
 prot_top <- c()
@@ -364,7 +525,7 @@ raw_genes <- read.csv("DESeq_normalized_prot.csv", row.names=1) %>%
 temp <- t(raw_genes)
 prot_bray_dm <- vegdist(temp, method="bray", na.rm=T)
 adonis2(prot_bray_dm ~ location * treatment * harvest, data = mtx_design, strata = mtx_design$harvest, permutations = 10000)
-tax <- read.csv("sup_tbl_S5_metaT_vs_prot_reciprocal_besthit_EEN.csv", header=T, stringsAsFactors = F) %>%
+tax <- read.csv(paste0(working_directory, "sup_tbl_S5_metaT_vs_prot_reciprocal_besthit_EEN.csv"), header=T, stringsAsFactors = F) %>%
   select(c(1,2,10,11, 15:22))
 raw_genes1 <- merge(raw_genes, tax, by.x="row.names", by.y="transcript_id")
 # Get fungi
